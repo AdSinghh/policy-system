@@ -101,9 +101,9 @@ jobs:
     permissions:
       contents: read
       packages: read
-    environment:
-      name: production
-      url: http://${{ secrets.EC2_HOST }}
+    # No `environment:` block. Its `url` field cannot reference the `secrets`
+    # context — only github/vars/needs/env — and using it there is a workflow
+    # validation error, not a step failure: the run dies in 0s with no jobs.
     steps:
       - name: Configure SSH
         run: |
