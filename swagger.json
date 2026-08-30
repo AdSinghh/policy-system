@@ -1,0 +1,269 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Policy Management API",
+    "version": "1.0.0",
+    "description": "Insurance policy data pipeline. Imports CSV/XLSX sheets into six MongoDB collections using a pool of worker threads, exposes search and per-user aggregation, restarts itself under sustained CPU load, and delivers messages at a scheduled instant."
+  },
+  "servers": [
+    { "url": "http://localhost:4000", "description": "Local" }
+  ],
+  "tags": [
+    { "name": "Import", "description": "Task 1.1 — spreadsheet ingestion via worker threads" },
+    { "name": "Policies", "description": "Tasks 1.2 and 1.3 — search and aggregation" },
+    { "name": "Schedules", "description": "Task 2.2 — deferred message delivery" },
+    { "name": "System", "description": "Task 2.1 — health and the CPU watchdog" }
+  ],
+  "paths": {
+    "/api/upload": {
+      "post": {
+        "tags": ["Import"],
+        "summary": "Upload a CSV or XLSX sheet",
+        "description": "Stores the file and starts a worker-thread pool to import it. Returns immediately with a job id; poll GET /api/imports/{jobId} for progress. Imports are idempotent — uploading the same sheet twice updates the same documents rather than duplicating them.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "required": ["file"],
+                "properties": {
+                  "file": { "type": "string", "format": "binary", "description": ".csv, .xlsx or .xlsm" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Import queued",
+            "content": {
+              "application/json": {
+                "example": {
+                  "jobId": "6a9482549ae9ea9a2eb3f9be",
+                  "status": "queued",
+                  "originalName": "data-sheet.csv",
+                  "statusUrl": "/api/imports/6a9482549ae9ea9a2eb3f9be"
+                }
+              }
+            }
+          },
+          "400": { "description": "No file, or an unsupported file type" },
+          "413": { "description": "File exceeds IMPORT_MAX_FILE_MB" }
+        }
+      }
+    },
+    "/api/imports": {
+      "get": {
+        "tags": ["Import"],
+        "summary": "List recent import jobs",
+        "parameters": [
+          { "name": "limit", "in": "query", "schema": { "type": "integer", "default": 20, "maximum": 50 } }
+        ],
+        "responses": { "200": { "description": "Recent jobs, newest first" } }
+      }
+    },
+    "/api/imports/{jobId}": {
+      "get": {
+        "tags": ["Import"],
+        "summary": "Import job progress and outcome",
+        "parameters": [
+          { "name": "jobId", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Job document",
+            "content": {
+              "application/json": {
+                "example": {
+                  "_id": "6a9482549ae9ea9a2eb3f9be",
+                  "originalName": "data-sheet.csv",
+                  "status": "completed",
+                  "workerCount": 4,
+                  "processedRows": 1198,
+                  "skippedRows": 0,
+                  "rowErrors": [],
+                  "counts": { "agents": 3, "users": 1198, "accounts": 1198, "categories": 19, "carriers": 46, "policies": 1198 },
+                  "durationMs": 1286
+                }
+              }
+            }
+          },
+          "400": { "description": "Malformed job id" },
+          "404": { "description": "No such job" }
+        }
+      }
+    },
+    "/api/policies/search": {
+      "get": {
+        "tags": ["Policies"],
+        "summary": "Find a user's policies by username",
+        "description": "Matches an anchored, escaped prefix against the user's normalised name. A term containing '@' is treated as an email instead. Returns the matching users alongside their policies with carrier, category, account and agent resolved.",
+        "parameters": [
+          { "name": "username", "in": "query", "required": true, "schema": { "type": "string" }, "example": "Lura Lucca" },
+          { "name": "page", "in": "query", "schema": { "type": "integer", "default": 1 } },
+          { "name": "limit", "in": "query", "schema": { "type": "integer", "default": 20, "maximum": 100 } }
+        ],
+        "responses": {
+          "200": { "description": "Matching users and their policies" },
+          "400": { "description": "username not supplied" }
+        }
+      }
+    },
+    "/api/policies/aggregate-by-user": {
+      "get": {
+        "tags": ["Policies"],
+        "summary": "Policies aggregated per user",
+        "description": "One row per user: policy count, premium total and the span their policies cover. Note that in the supplied sample sheet every user holds exactly one policy, so all counts are 1.",
+        "parameters": [
+          { "name": "page", "in": "query", "schema": { "type": "integer", "default": 1 } },
+          { "name": "limit", "in": "query", "schema": { "type": "integer", "default": 20, "maximum": 100 } },
+          { "name": "includePolicies", "in": "query", "schema": { "type": "boolean", "default": false }, "description": "Nest each user's policies in the response" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Aggregated rows",
+            "content": {
+              "application/json": {
+                "example": {
+                  "data": [
+                    {
+                      "userId": "5f2c1a...",
+                      "firstname": "Robert Harkrader",
+                      "city": "Welcome",
+                      "state": "NC",
+                      "policyCount": 1,
+                      "totalPremium": 133736,
+                      "earliestStart": "2018-11-02T00:00:00.000Z",
+                      "latestEnd": "2019-11-02T00:00:00.000Z"
+                    }
+                  ],
+                  "meta": { "total": 1198, "page": 1, "limit": 20, "pages": 60 }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/schedules": {
+      "post": {
+        "tags": ["Schedules"],
+        "summary": "Schedule a message for a given day and time",
+        "description": "Resolves day + time in an explicit IANA timezone to an absolute instant, so the result does not depend on where the server runs. `day` accepts a calendar date (YYYY-MM-DD) or a weekday name, which resolves to its next occurrence.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["message", "day", "time"],
+                "properties": {
+                  "message": { "type": "string", "example": "Renewal reminder" },
+                  "day": { "type": "string", "example": "2026-09-05", "description": "YYYY-MM-DD or a weekday name" },
+                  "time": { "type": "string", "example": "14:30", "description": "HH:MM or HH:MM:SS, 24-hour" },
+                  "timezone": { "type": "string", "example": "Asia/Kolkata", "description": "IANA zone. Defaults to DEFAULT_TIMEZONE." }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Scheduled",
+            "content": {
+              "application/json": {
+                "example": {
+                  "id": "6a9482bd9ae9ea9a2eb3fa0e",
+                  "message": "Renewal reminder",
+                  "day": "2026-09-05",
+                  "time": "14:30",
+                  "timezone": "Asia/Kolkata",
+                  "runAt": "2026-09-05T09:00:00.000Z",
+                  "status": "pending"
+                }
+              }
+            }
+          },
+          "400": { "description": "Missing field, unparseable day/time, or unknown timezone" }
+        }
+      },
+      "get": {
+        "tags": ["Schedules"],
+        "summary": "List scheduled messages",
+        "parameters": [
+          { "name": "status", "in": "query", "schema": { "type": "string", "enum": ["pending", "processing", "completed", "failed", "cancelled"] } },
+          { "name": "limit", "in": "query", "schema": { "type": "integer", "default": 50 } }
+        ],
+        "responses": { "200": { "description": "Scheduled messages, soonest first" } }
+      }
+    },
+    "/api/schedules/delivered": {
+      "get": {
+        "tags": ["Schedules"],
+        "summary": "Messages the scheduler has written out",
+        "responses": { "200": { "description": "Delivered posts, newest first" } }
+      }
+    },
+    "/api/schedules/{id}": {
+      "delete": {
+        "tags": ["Schedules"],
+        "summary": "Cancel a pending scheduled message",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": {
+          "200": { "description": "Cancelled" },
+          "400": { "description": "Malformed id" },
+          "404": { "description": "No pending message with that id" }
+        }
+      }
+    },
+    "/api/system/status": {
+      "get": {
+        "tags": ["System"],
+        "summary": "Process health and watchdog configuration",
+        "responses": {
+          "200": {
+            "description": "Status",
+            "content": {
+              "application/json": {
+                "example": {
+                  "status": "ok",
+                  "pid": 52670,
+                  "uptimeSeconds": 10,
+                  "cpuPercent": 2.4,
+                  "importActive": false,
+                  "watchdog": { "thresholdPercent": 70, "sustainedSamples": 5, "sampleIntervalMs": 1000, "suppressedDuringImport": true },
+                  "mongo": "connected"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/system/load": {
+      "post": {
+        "tags": ["System"],
+        "summary": "Burn CPU on purpose to demonstrate the watchdog",
+        "description": "Blocks the event loop so CPU exceeds the threshold and the worker is drained and replaced. Gated behind ENABLE_LOAD_ENDPOINT; disable outside demos.",
+        "parameters": [
+          { "name": "seconds", "in": "query", "schema": { "type": "integer", "default": 8, "maximum": 60 } }
+        ],
+        "responses": {
+          "200": { "description": "Load started" },
+          "404": { "description": "Load generator disabled" }
+        }
+      }
+    },
+    "/health": {
+      "get": {
+        "tags": ["System"],
+        "summary": "Liveness probe",
+        "responses": {
+          "200": { "description": "Healthy" },
+          "503": { "description": "Database not connected" }
+        }
+      }
+    }
+  }
+}

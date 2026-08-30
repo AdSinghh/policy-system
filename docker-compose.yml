@@ -1,0 +1,38 @@
+# Local development stack. Deployment injects real environment variables instead
+# of mounting a file — see the AWS section of README.md.
+services:
+  backend:
+    build: .
+    ports:
+      - "4000:4000"
+    environment:
+      MONGO_URI: mongodb://mongo:27017/policydb
+      PORT: 4000
+      NODE_ENV: development
+      LOG_LEVEL: info
+      CLUSTER_WORKERS: 1
+      CPU_THRESHOLD_PERCENT: 70
+      DEFAULT_TIMEZONE: UTC
+      ENABLE_LOAD_ENDPOINT: "true"
+    depends_on:
+      mongo:
+        condition: service_healthy
+    restart: unless-stopped
+
+  mongo:
+    image: mongo:6.0
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo-data:/data/db
+    healthcheck:
+      # Without this the API races the database on a cold start.
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+
+volumes:
+  mongo-data:

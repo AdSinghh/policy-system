@@ -1,0 +1,13 @@
+.git
+.gitignore
+node_modules
+npm-debug.log*
+uploads
+tests
+coverage
+*.log
+
+# Never bake credentials into an image layer.
+.env
+.env.*
+local.env
