@@ -6,7 +6,10 @@
     "description": "Insurance policy data pipeline. Imports CSV/XLSX sheets into six MongoDB collections using a pool of worker threads, exposes search and per-user aggregation, restarts itself under sustained CPU load, and delivers messages at a scheduled instant."
   },
   "servers": [
-    { "url": "http://localhost:4000", "description": "Local" }
+    {
+      "url": "/",
+      "description": "This server — requests go to whichever host is serving these docs, so Try it out works identically on localhost and on a deployed instance"
+    }
   ],
   "tags": [
     { "name": "Import", "description": "Task 1.1 — spreadsheet ingestion via worker threads" },
