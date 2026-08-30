@@ -37,11 +37,16 @@ function runPrimary() {
     thresholdPercent: config.cpu.thresholdPercent,
     sampleIntervalMs: config.cpu.sampleIntervalMs,
     sustainedSamples: config.cpu.sustainedSamples,
+    // Sample every live worker that is not already on its way out.
+    getPids: () =>
+      [...workers.entries()]
+        .filter(([, entry]) => !entry.draining)
+        .map(([pid]) => pid),
     isSuppressed: () =>
       !config.cpu.restartDuringImport &&
       [...workers.values()].some((entry) => entry.importActive),
-    onTrip: () => {
-      const target = [...workers.values()].find((entry) => !entry.draining);
+    onTrip: (pid) => {
+      const target = workers.get(pid);
       if (target) recycle(target, "cpu threshold exceeded");
     },
   });
@@ -59,7 +64,6 @@ function runPrimary() {
       }
     });
 
-    monitor.watch(worker.process.pid);
     logger.info("Forked API worker pid=%d", worker.process.pid);
     return entry;
   }
@@ -88,6 +92,9 @@ function runPrimary() {
     } catch {
       // Channel already closed; the SIGKILL timer will finish the job.
     }
+
+    // Stop sampling this pid immediately; it is already on its way out.
+    monitor.forget(worker.process.pid);
 
     const force = setTimeout(() => {
       logger.warn("Worker pid=%d did not drain in time; sending SIGKILL", worker.process.pid);
@@ -120,6 +127,7 @@ function runPrimary() {
   });
 
   for (let i = 0; i < config.cluster.workers; i += 1) spawn();
+  monitor.start();
 
   logger.info(
     "Primary pid=%d supervising %d worker(s); restart at %d%% CPU sustained over %d samples",

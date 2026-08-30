@@ -2,13 +2,17 @@ const pidusage = require("pidusage");
 const logger = require("./logger");
 
 /**
- * Samples a process's CPU and trips once usage stays above the threshold.
+ * Samples the CPU of every API worker and trips on the first one to stay above
+ * the threshold.
  *
  * The sampler only detects and reports; the primary owns what a trip *means*
- * (drain, restart, cool down). Keeping those apart is what makes the cooldown
- * and the import suppression expressible at all — the old version killed the
- * worker from inside the sampler, so a still-busy box would be killed again
+ * (drain, replace, cool down). Keeping those apart is what makes the cooldown
+ * and the import suppression expressible at all — the original version killed
+ * the worker from inside the sampler, so a still-busy box would be killed again
  * one second after its replacement booted.
+ *
+ * Streaks are tracked per pid, so one hot worker cannot be masked by an idle
+ * sibling and a replacement never inherits its predecessor's streak.
  *
  * `pidusage` reports percentage of a single core, so on a multi-core host the
  * value can exceed 100. A 70% threshold therefore means "70% of one core".
@@ -17,21 +21,30 @@ function createCpuMonitor({
   thresholdPercent,
   sampleIntervalMs,
   sustainedSamples,
+  getPids,
   onTrip,
   isSuppressed = () => false,
 }) {
   let timer = null;
-  let pid = null;
-  let consecutiveHigh = 0;
   let pausedUntil = 0;
-  let latest = { cpu: 0, memory: 0, sampledAt: null };
+  const streaks = new Map(); // pid -> consecutive samples above threshold
+  const latest = new Map(); // pid -> last reading
 
   async function sample() {
-    if (!pid) return;
+    const pids = getPids();
+    if (pids.length === 0) return;
 
-    let stats;
+    // Forget workers that have gone away, so a recycled pid starts clean.
+    for (const pid of streaks.keys()) {
+      if (!pids.includes(pid)) {
+        streaks.delete(pid);
+        latest.delete(pid);
+      }
+    }
+
+    let readings;
     try {
-      stats = await pidusage(pid);
+      readings = await pidusage(pids);
     } catch (err) {
       // Expected while a worker is being replaced: the pid is briefly gone.
       if (err.code !== "ENOENT" && err.code !== "ESRCH") {
@@ -40,70 +53,92 @@ function createCpuMonitor({
       return;
     }
 
-    latest = { cpu: stats.cpu, memory: stats.memory, sampledAt: new Date().toISOString() };
+    for (const pid of pids) {
+      const stats = readings[pid];
+      if (!stats) continue;
 
-    if (stats.cpu <= thresholdPercent) {
-      consecutiveHigh = 0;
-      return;
-    }
+      latest.set(pid, {
+        pid,
+        cpu: stats.cpu,
+        memory: stats.memory,
+        sampledAt: new Date().toISOString(),
+      });
 
-    consecutiveHigh += 1;
-    if (consecutiveHigh < sustainedSamples) return;
+      if (stats.cpu <= thresholdPercent) {
+        streaks.set(pid, 0);
+        continue;
+      }
 
-    // Sustained high CPU confirmed. Decide whether acting on it is appropriate.
-    if (Date.now() < pausedUntil) {
-      logger.debug("CPU high but monitor is in cooldown; ignoring");
-      return;
-    }
+      const streak = (streaks.get(pid) || 0) + 1;
+      streaks.set(pid, streak);
+      if (streak < sustainedSamples) continue;
 
-    if (isSuppressed()) {
+      // Sustained high CPU confirmed. Decide whether acting on it is appropriate.
+      if (Date.now() < pausedUntil) {
+        logger.debug("CPU high on pid %d but monitor is in cooldown", pid);
+        continue;
+      }
+
+      if (isSuppressed()) {
+        logger.warn(
+          "CPU at %d%% for %ds on pid %d, but an import is running — restart suppressed",
+          Math.round(stats.cpu),
+          Math.round((sustainedSamples * sampleIntervalMs) / 1000),
+          pid,
+        );
+        streaks.set(pid, 0);
+        continue;
+      }
+
       logger.warn(
-        "CPU at %d%% for %ds, but an import is running — restart suppressed",
+        "CPU at %d%% (threshold %d%%) for %d consecutive samples on pid %d — restarting worker",
         Math.round(stats.cpu),
-        Math.round((sustainedSamples * sampleIntervalMs) / 1000),
+        thresholdPercent,
+        sustainedSamples,
+        pid,
       );
-      consecutiveHigh = 0;
+
+      streaks.set(pid, 0);
+      onTrip(pid, { cpu: stats.cpu, memory: stats.memory });
+
+      // One worker per pass: recycling is serialised so a load spike that hits
+      // every worker at once cannot take the whole cluster down together.
       return;
     }
-
-    logger.warn(
-      "CPU at %d%% (threshold %d%%) for %d consecutive samples — restarting worker",
-      Math.round(stats.cpu),
-      thresholdPercent,
-      sustainedSamples,
-    );
-
-    consecutiveHigh = 0;
-    onTrip({ cpu: stats.cpu, memory: stats.memory });
   }
 
   return {
-    /** Point the sampler at a (new) pid and reset the streak. */
-    watch(nextPid) {
-      pid = nextPid;
-      consecutiveHigh = 0;
-      if (!timer) {
-        timer = setInterval(() => {
-          sample().catch((err) => logger.debug("cpuMonitor: %s", err.message));
-        }, sampleIntervalMs);
-        timer.unref();
-      }
+    start() {
+      if (timer) return;
+      timer = setInterval(() => {
+        sample().catch((err) => logger.debug("cpuMonitor: %s", err.message));
+      }, sampleIntervalMs);
+      timer.unref();
     },
 
     /** Ignore trips for a while — used after a restart so it cannot loop. */
     cooldown(durationMs) {
       pausedUntil = Date.now() + durationMs;
-      consecutiveHigh = 0;
+      streaks.clear();
+    },
+
+    /** Drop a pid's streak immediately, e.g. once it has been asked to drain. */
+    forget(pid) {
+      streaks.delete(pid);
+      latest.delete(pid);
     },
 
     getLatest() {
-      return { ...latest, thresholdPercent, inCooldown: Date.now() < pausedUntil };
+      return {
+        workers: [...latest.values()],
+        thresholdPercent,
+        inCooldown: Date.now() < pausedUntil,
+      };
     },
 
     stop() {
       if (timer) clearInterval(timer);
       timer = null;
-      pid = null;
     },
   };
 }
