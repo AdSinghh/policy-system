@@ -44,6 +44,12 @@ module.exports = {
     // An import legitimately pins the CPU. Restarting mid-file corrupts the run,
     // so suppress by default and let the import finish.
     restartDuringImport: bool(process.env.CPU_RESTART_DURING_IMPORT, false),
+    // A worker dying sooner than this counts as a startup failure rather than a
+    // deliberate recycle. Must exceed the driver's server-selection timeout
+    // (10s) plus DNS and TLS setup — an unreachable Atlas cluster takes 13-15s
+    // to fail. Set below that, the crash-loop backoff never engages and the
+    // supervisor re-forks indefinitely.
+    startupFailureMs: num(process.env.STARTUP_FAILURE_MS, 30000),
   },
 
   import: {

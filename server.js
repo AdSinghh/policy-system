@@ -39,9 +39,17 @@ function runPrimary() {
   const workers = new Map(); // pid -> { worker, importActive, draining, startedAt }
   let shuttingDown = false;
 
-  // Crash-loop protection: a worker that dies sooner than this was almost
-  // certainly a startup failure rather than a recycled one.
-  const FAST_EXIT_MS = 10000;
+  /**
+   * Crash-loop protection: a worker that dies sooner than this was almost
+   * certainly a startup failure rather than a recycled one.
+   *
+   * This must sit comfortably above the driver's server-selection timeout. An
+   * unreachable database takes serverSelectionTimeoutMS (10s) plus DNS and TLS
+   * setup to fail — measured at 13-15s against Atlas. With the threshold set to
+   * 10s every such death looked "slow enough to be healthy", the counter reset
+   * each time, and the supervisor re-forked forever without ever backing off.
+   */
+  const FAST_EXIT_MS = config.cpu.startupFailureMs;
   const MAX_FAST_EXITS = 5;
   let consecutiveFastExits = 0;
 
