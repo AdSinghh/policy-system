@@ -15,7 +15,13 @@ process.on("warning", (warning) => {
 if (cluster.isPrimary) {
   runPrimary();
 } else {
-  runWorker();
+  // runWorker is async: without this catch, a failed initial database connection
+  // becomes an unhandled rejection that prints a topology dump and kills the
+  // worker, and the primary re-forks into a crash loop.
+  runWorker().catch((err) => {
+    logger.error("API worker failed to start: %s", err.message);
+    process.exit(1);
+  });
 }
 
 /* ────────────────────────────── primary ────────────────────────────────── */
@@ -30,8 +36,14 @@ if (cluster.isPrimary) {
 function runPrimary() {
   const { createCpuMonitor } = require("./utils/cpuMonitor");
 
-  const workers = new Map(); // pid -> { worker, importActive, draining }
+  const workers = new Map(); // pid -> { worker, importActive, draining, startedAt }
   let shuttingDown = false;
+
+  // Crash-loop protection: a worker that dies sooner than this was almost
+  // certainly a startup failure rather than a recycled one.
+  const FAST_EXIT_MS = 10000;
+  const MAX_FAST_EXITS = 5;
+  let consecutiveFastExits = 0;
 
   const monitor = createCpuMonitor({
     thresholdPercent: config.cpu.thresholdPercent,
@@ -53,7 +65,12 @@ function runPrimary() {
 
   function spawn() {
     const worker = cluster.fork();
-    const entry = { worker, importActive: false, draining: false };
+    const entry = {
+      worker,
+      importActive: false,
+      draining: false,
+      startedAt: Date.now(),
+    };
     workers.set(worker.process.pid, entry);
 
     // Workers report when an import starts/stops so the watchdog can stand down
@@ -113,17 +130,66 @@ function runPrimary() {
   }
 
   cluster.on("exit", (worker, code, signal) => {
+    const entry = workers.get(worker.process.pid);
+    const lifetimeMs = entry ? Date.now() - entry.startedAt : Infinity;
+    const wasDeliberate = Boolean(entry?.draining);
     workers.delete(worker.process.pid);
+
     logger.info(
-      "Worker pid=%d exited (code=%s signal=%s)",
+      "Worker pid=%d exited (code=%s signal=%s) after %dms",
       worker.process.pid,
       code,
       signal || "none",
+      lifetimeMs,
     );
 
     if (shuttingDown) return;
-    spawn();
-    monitor.cooldown(config.cpu.cooldownMs);
+
+    /**
+     * Distinguish "recycled on purpose" from "died on startup".
+     *
+     * A worker that cannot reach the database exits immediately, and re-forking
+     * it at full speed burns a core producing identical stack traces. Back off
+     * exponentially, then give up so the container exits and the orchestrator
+     * (Docker restart policy, systemd, ECS) can surface a real failure.
+     */
+    if (!wasDeliberate && lifetimeMs < FAST_EXIT_MS) {
+      consecutiveFastExits += 1;
+    } else {
+      consecutiveFastExits = 0;
+    }
+
+    if (consecutiveFastExits >= MAX_FAST_EXITS) {
+      logger.error(
+        "Worker exited within %dms on %d consecutive attempts — giving up. " +
+          "Check MONGO_URI and that this host is allowed to reach the database.",
+        FAST_EXIT_MS,
+        consecutiveFastExits,
+      );
+      process.exit(1);
+    }
+
+    const delayMs = consecutiveFastExits
+      ? Math.min(30000, 1000 * 2 ** (consecutiveFastExits - 1))
+      : 0;
+
+    if (delayMs) {
+      logger.warn(
+        "Restarting worker in %dms (attempt %d/%d)",
+        delayMs,
+        consecutiveFastExits,
+        MAX_FAST_EXITS,
+      );
+    }
+
+    // Deliberately not unref'd: while no worker is alive this timer is the only
+    // thing holding the primary's event loop open. Unref'ing it makes the
+    // supervisor exit 0 during backoff, which looks like a clean shutdown.
+    setTimeout(() => {
+      if (shuttingDown) return;
+      spawn();
+      monitor.cooldown(config.cpu.cooldownMs);
+    }, delayMs);
   });
 
   for (let i = 0; i < config.cluster.workers; i += 1) spawn();
