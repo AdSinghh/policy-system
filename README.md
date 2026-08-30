@@ -373,6 +373,57 @@ predictability matters more than the last dollar, take this one.
 
 ---
 
+## CI/CD
+
+`.github/workflows/ci-cd.yml`
+
+| Trigger | Test | Build image | Push to GHCR | Deploy |
+| ------- | :--: | :---------: | :----------: | :----: |
+| PR to `main` or `dev` | yes | yes | no | no |
+| Push to `dev` | yes | yes | `dev-<sha>` | no |
+| Push to `main` (a merged PR) | yes | yes | `main-<sha>` | **yes** |
+
+The image is built on the runner, not on the instance. Runners are x86_64, the
+same as the t3.micro, so it is a native build — and the earlier on-instance
+builds are what filled that 6.7 GB disk to 100%. The instance only pulls.
+
+**Deploy sequence.** Pull the new image, tag the outgoing one `previous`,
+restart the container, then poll `/health` for up to 90 s. Because the app only
+answers `/health` once Mongo is connected, that check also catches a bad
+connection string or a lapsed Atlas allowlist entry. On failure it prints the
+container logs, **rolls back to `previous`**, and fails the job. On success it
+verifies `/health`, `/api-docs/` and an API route from the public internet.
+
+**Secrets** (repository → Settings → Secrets and variables → Actions):
+
+| Secret | Value |
+| ------ | ----- |
+| `EC2_HOST` | the instance's public IP |
+| `EC2_USER` | `ubuntu` |
+| `EC2_SSH_KEY` | private key of a **dedicated deploy keypair**, not your instance login key |
+
+`GITHUB_TOKEN` is provided automatically and is what the instance uses to
+authenticate to GHCR — it expires with the run, so no long-lived registry
+credential is ever stored on the box.
+
+**`MONGO_URI` is deliberately not a GitHub secret.** It lives in `.env` on the
+instance at mode 600, and the workflow only swaps the image. The database
+credential never enters CI. The trade-off is that a rebuilt instance needs its
+`.env` recreated by hand.
+
+To rotate the deploy key:
+
+```bash
+ssh-keygen -t ed25519 -N "" -C "github-actions-deploy" -f deploy_key
+ssh ubuntu@<host> "echo '$(cat deploy_key.pub)' >> ~/.ssh/authorized_keys"
+gh secret set EC2_SSH_KEY --repo <owner>/<repo> < deploy_key
+rm -f deploy_key            # GitHub has it; nothing needs a local copy
+```
+
+Remove the old entry from `~/.ssh/authorized_keys` on the instance afterwards.
+
+---
+
 ## Notes on the sample sheet
 
 Things worth flagging to whoever produced the data:

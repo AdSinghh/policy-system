@@ -1,0 +1,199 @@
+name: CI/CD
+
+# main → test, build, push, deploy to EC2 (a merged PR arrives here as a push)
+# dev  → test, build, push. No deploy.
+# PRs  → test and build only; nothing is published or deployed.
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
+  workflow_dispatch:
+
+# One run per branch. Queued deploys to main are pointless — only the newest
+# commit matters — but never cancel a deploy mid-flight or the instance can be
+# left with no container running.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  REGISTRY: ghcr.io
+  NODE_VERSION: "20"
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      # `npm ci` fails loudly if package-lock.json has drifted from package.json,
+      # which is exactly what we want before building an image from it.
+      - name: Install dependencies
+        run: npm ci
+
+      # The suite needs no database: app.js builds the Express app without
+      # connecting to Mongo or spawning threads.
+      - name: Run tests
+        run: npm test
+
+  build:
+    name: Build image
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.meta.outputs.image }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # GHCR rejects uppercase paths, and the owner here is "AdSinghh".
+      - name: Resolve image name
+        id: meta
+        run: |
+          REPO_LC="$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')"
+          echo "repo_lc=$REPO_LC" >> "$GITHUB_OUTPUT"
+          echo "image=${{ env.REGISTRY }}/$REPO_LC:${{ github.ref_name }}-${{ github.sha }}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Publishing from a PR would let a fork write to the registry, so only
+      # branch pushes log in and push.
+      - name: Log in to GHCR
+        if: github.event_name == 'push'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          # Runners are x86_64 and so is the t3.micro, so this is a native
+          # build. Building on an arm64 Mac needs --platform linux/amd64.
+          platforms: linux/amd64
+          push: ${{ github.event_name == 'push' }}
+          tags: |
+            ${{ steps.meta.outputs.image }}
+            ${{ env.REGISTRY }}/${{ steps.meta.outputs.repo_lc }}:${{ github.ref_name }}
+          # Layer cache in the registry: dependencies only reinstall when
+          # package-lock.json changes.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false
+
+  deploy:
+    name: Deploy to EC2
+    needs: build
+    # Only a real push to main deploys. Pull requests and dev stop at build.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    environment:
+      name: production
+      url: http://${{ secrets.EC2_HOST }}
+    steps:
+      - name: Configure SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/deploy.pem
+          chmod 600 ~/.ssh/deploy.pem
+          ssh-keyscan -H "${{ secrets.EC2_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Deploy
+        env:
+          IMAGE: ${{ needs.build.outputs.image }}
+          # Scoped to this run and expires with it, so no long-lived registry
+          # credential is ever stored on the instance.
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USER: ${{ github.actor }}
+        run: |
+          ssh -i ~/.ssh/deploy.pem -o BatchMode=yes -o ServerAliveInterval=30 \
+            "${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}" \
+            "IMAGE='$IMAGE' GHCR_TOKEN='$GHCR_TOKEN' GHCR_USER='$GHCR_USER' bash -s" <<'REMOTE'
+          set -euo pipefail
+
+          cd ~/policy-system
+
+          # MONGO_URI and the rest live in .env on the instance (mode 600) and
+          # are deliberately NOT GitHub secrets — the database credential never
+          # enters CI.
+          [ -f .env ] || { echo "::error::.env missing on the instance"; exit 1; }
+
+          echo "$GHCR_TOKEN" | sudo docker login ghcr.io -u "$GHCR_USER" --password-stdin
+          sudo docker pull "$IMAGE"
+
+          # Keep the outgoing image so a failed health check can roll back.
+          if sudo docker image inspect policy-api:current >/dev/null 2>&1; then
+            sudo docker tag policy-api:current policy-api:previous
+          fi
+          sudo docker tag "$IMAGE" policy-api:current
+
+          start() {
+            sudo docker rm -f policy-api >/dev/null 2>&1 || true
+            sudo docker run -d --name policy-api --restart unless-stopped \
+              --env-file .env -p 80:4000 \
+              --memory 700m --memory-swap 1500m \
+              "$1" >/dev/null
+          }
+
+          start policy-api:current
+
+          # The app answers /health only once Mongo is connected, so this also
+          # catches a bad connection string or a lapsed Atlas allowlist entry.
+          healthy=""
+          for _ in $(seq 1 45); do
+            if curl -sf --max-time 3 localhost:80/health >/dev/null 2>&1; then
+              healthy=1; break
+            fi
+            sleep 2
+          done
+
+          if [ -z "$healthy" ]; then
+            echo "::error::New image failed its health check"
+            sudo docker logs --tail 40 policy-api 2>&1 | tail -40
+            if sudo docker image inspect policy-api:previous >/dev/null 2>&1; then
+              echo "Rolling back to the previous image"
+              start policy-api:previous
+              sleep 10
+              curl -sf --max-time 5 localhost:80/health >/dev/null 2>&1 \
+                && echo "Rollback succeeded — previous version is serving" \
+                || echo "::error::Rollback also failed; the instance needs attention"
+            fi
+            sudo docker logout ghcr.io >/dev/null 2>&1 || true
+            exit 1
+          fi
+
+          echo "Healthy: $(curl -s --max-time 5 localhost:80/health)"
+
+          sudo docker logout ghcr.io >/dev/null 2>&1 || true
+          # The 6.7GB disk hit 100% during earlier on-instance builds; prune so
+          # old image layers cannot accumulate across deploys.
+          sudo docker image prune -f >/dev/null 2>&1 || true
+          df -h / | awk 'NR==2{print "Disk: "$4" free ("$5" used)"}'
+          REMOTE
+
+      - name: Verify from the public internet
+        run: |
+          for path in /health /api-docs/ "/api/policies/aggregate-by-user?limit=1"; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 \
+              "http://${{ secrets.EC2_HOST }}${path}")
+            echo "  ${path} -> HTTP ${code}"
+            [ "$code" = "200" ] || { echo "::error::${path} returned ${code}"; exit 1; }
+          done
+
+      - name: Clean up key
+        if: always()
+        run: rm -f ~/.ssh/deploy.pem
