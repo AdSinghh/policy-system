@@ -7,8 +7,6 @@ const AccountSchema = new mongoose.Schema(
     accountNameKey: { type: String, required: true },
     account_type: String,
 
-    // The owning user. Previously absent, which left "User's Account" as an
-    // orphan collection joinable only indirectly through Policy.
     userId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
@@ -19,8 +17,6 @@ const AccountSchema = new mongoose.Schema(
   { timestamps: true, _id: false },
 );
 
-// Account names are not unique on their own: "Lura Lucca & Owen Dodson" belongs
-// to two different people in the sample sheet. The owner is part of the key.
 AccountSchema.index({ accountNameKey: 1, userId: 1 }, { unique: true });
 
 module.exports =

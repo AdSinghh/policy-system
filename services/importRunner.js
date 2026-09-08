@@ -8,9 +8,10 @@ const ImportJob = require("../models/ImportJob");
 
 const WORKER_PATH = path.join(__dirname, "..", "workers", "importWorker.js");
 
-// Number of imports currently running in this process. The CPU watchdog lives in
-// the cluster primary, so the count is relayed over cluster IPC; without it the
-// watchdog sees an import's legitimate CPU spike and kills the worker mid-file.
+//ImportRunner manages the import workers. It creates worker threads,
+//  passes them the file and configuration, receives progress and errors,
+// updates ImportJob status and performs cleanup
+
 let activeImports = 0;
 
 function signalPrimary() {
@@ -26,13 +27,9 @@ function isImportActive() {
   return activeImports > 0;
 }
 
-/**
- * Spawns the worker pool for one uploaded file and keeps its ImportJob current.
- *
- * Returns as soon as the pool is running; the caller has already answered the
- * HTTP request with a job id. Progress and the terminal state land on the job
- * document, which the client polls.
- */
+//runImport() takes a queued import job and creates multiple Worker Threads
+//  to process the uploaded file in parallel. It tracks progress/errors in MongoDB,
+// marks the job as completed/partial/failed, and finally deletes the temporary uploaded file.
 async function runImport(job) {
   activeImports += 1;
   signalPrimary();
@@ -93,7 +90,10 @@ async function runImport(job) {
       });
 
       worker.on("exit", (code) => {
-        if (code !== 0 && !failures.some((f) => f.startsWith(`worker ${workerIndex}:`))) {
+        if (
+          code !== 0 &&
+          !failures.some((f) => f.startsWith(`worker ${workerIndex}:`))
+        ) {
           failures.push(`worker ${workerIndex} exited with code ${code}`);
         }
         resolve();

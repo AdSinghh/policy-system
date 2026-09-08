@@ -1,13 +1,6 @@
-/**
- * Field-level cleanup shared by the importer and the search routes.
- *
- * The sample sheet mixes two data generations: synthetic rows with bare 10-digit
- * phone numbers and lowercase names, and what look like real exported rows with
- * "(336) 245-8310", extensions, and SHOUTING NAMES. Normalising on the way in is
- * what makes a lookup key usable later.
- */
-
-/** Collapse internal whitespace and trim. Non-strings become their string form. */
+//Normalizes incoming data.
+//"It ensures equivalent input values have a consistent representation
+//  for searching and generating business keys."
 function text(value) {
   if (value === undefined || value === null) return "";
   if (value instanceof Date) return value.toISOString();

@@ -3,13 +3,8 @@ const path = require("path");
 const csv = require("csv-parser");
 const ExcelJS = require("exceljs");
 
-/**
- * Yields spreadsheet rows as plain objects, from either CSV or XLSX.
- *
- * Both paths stream. Every import worker opens the file independently and reads
- * only its own stripe of rows, so memory stays flat regardless of file size and
- * regardless of how many workers are running.
- */
+//Handles reading/accessing rows from the uploaded data source.
+//"It abstracts the source of spreadsheet/CSV rows so the import logic can work with the input data consistently."
 
 const XLSX_EXTENSIONS = new Set([".xlsx", ".xlsm"]);
 

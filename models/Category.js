@@ -1,6 +1,5 @@
 const mongoose = require("mongoose");
 
-// Policy category, referred to as LOB (line of business) in the brief.
 const CategorySchema = new mongoose.Schema(
   {
     _id: mongoose.Schema.Types.ObjectId,

@@ -4,8 +4,6 @@ const path = require("path");
 const config = require("./config");
 const logger = require("./utils/logger");
 
-// The punycode deprecation comes from a transitive dependency and cannot be
-// fixed here; everything else should still surface.
 process.on("warning", (warning) => {
   if (warning.code === "DEP0040" || /punycode/i.test(warning.message)) return;
   logger.warn("%s: %s", warning.name, warning.message);
@@ -26,29 +24,12 @@ if (cluster.isPrimary) {
 
 /* ────────────────────────────── primary ────────────────────────────────── */
 
-/**
- * Supervises the API workers and owns the CPU restart policy (Task 2.1).
- *
- * The primary stays deliberately idle: it holds no database connection and
- * serves no traffic, so its own CPU never confuses the measurement and it stays
- * responsive enough to replace a worker that is pinned at 100%.
- */
 function runPrimary() {
   const { createCpuMonitor } = require("./utils/cpuMonitor");
 
   const workers = new Map(); // pid -> { worker, importActive, draining, startedAt }
   let shuttingDown = false;
 
-  /**
-   * Crash-loop protection: a worker that dies sooner than this was almost
-   * certainly a startup failure rather than a recycled one.
-   *
-   * This must sit comfortably above the driver's server-selection timeout. An
-   * unreachable database takes serverSelectionTimeoutMS (10s) plus DNS and TLS
-   * setup to fail — measured at 13-15s against Atlas. With the threshold set to
-   * 10s every such death looked "slow enough to be healthy", the counter reset
-   * each time, and the supervisor re-forked forever without ever backing off.
-   */
   const FAST_EXIT_MS = config.cpu.startupFailureMs;
   const MAX_FAST_EXITS = 5;
   let consecutiveFastExits = 0;
@@ -93,13 +74,6 @@ function runPrimary() {
     return entry;
   }
 
-  /**
-   * Replace a worker without dropping in-flight work.
-   *
-   * Ask it to drain, hold a SIGKILL in reserve for one that will not stop, and
-   * only fork the replacement once it is actually gone — otherwise two workers
-   * briefly share the port and the monitor watches the wrong pid.
-   */
   function recycle(entry, reason) {
     if (entry.draining || shuttingDown) return;
     entry.draining = true;
@@ -122,7 +96,10 @@ function runPrimary() {
     monitor.forget(worker.process.pid);
 
     const force = setTimeout(() => {
-      logger.warn("Worker pid=%d did not drain in time; sending SIGKILL", worker.process.pid);
+      logger.warn(
+        "Worker pid=%d did not drain in time; sending SIGKILL",
+        worker.process.pid,
+      );
       try {
         worker.process.kill("SIGKILL");
       } catch {
@@ -153,14 +130,6 @@ function runPrimary() {
 
     if (shuttingDown) return;
 
-    /**
-     * Distinguish "recycled on purpose" from "died on startup".
-     *
-     * A worker that cannot reach the database exits immediately, and re-forking
-     * it at full speed burns a core producing identical stack traces. Back off
-     * exponentially, then give up so the container exits and the orchestrator
-     * (Docker restart policy, systemd, ECS) can surface a real failure.
-     */
     if (!wasDeliberate && lifetimeMs < FAST_EXIT_MS) {
       consecutiveFastExits += 1;
     } else {
@@ -248,12 +217,6 @@ async function runWorker() {
 
   let closing = false;
 
-  /**
-   * Stop accepting connections, let in-flight requests finish, then exit.
-   *
-   * The old watchdog called worker.process.kill() directly, which dropped
-   * everything mid-flight — including a running import.
-   */
   async function drain(reason) {
     if (closing) return;
     closing = true;
@@ -287,13 +250,6 @@ async function runWorker() {
   });
 }
 
-/**
- * The scheduler runs as a worker thread of the API process.
- *
- * It therefore dies and restarts with its worker, which is fine and deliberate:
- * all state is in Mongo, claims are atomic, and an abandoned claim is reclaimed
- * after SCHEDULER_CLAIM_TIMEOUT_MS. Nothing is lost across a CPU restart.
- */
 function startScheduler() {
   if (!config.scheduler.enabled) {
     logger.info("Scheduler disabled (SCHEDULER_ENABLED=false)");
@@ -308,7 +264,9 @@ function startScheduler() {
       { workerData: { mongoUri: config.mongoUri } },
     );
 
-    worker.on("error", (err) => logger.error("Scheduler thread error: %s", err.message));
+    worker.on("error", (err) =>
+      logger.error("Scheduler thread error: %s", err.message),
+    );
     worker.on("exit", (code) => {
       if (code !== 0) logger.warn("Scheduler thread exited with code %d", code);
     });

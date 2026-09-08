@@ -5,14 +5,6 @@ const mongoose = require("mongoose");
 const config = require("./config");
 const logger = require("./utils/logger");
 
-/**
- * Builds the Express app and nothing else.
- *
- * No database connection, no worker threads. Those used to happen at require()
- * time, which meant `npm test` opened a live Atlas connection and leaked a
- * scheduler thread just by importing this file. server.js owns process lifecycle
- * now; this module is safe to require from a test.
- */
 const app = express();
 
 app.use(cors());
@@ -76,12 +68,19 @@ app.get("/", (req, res) => {
 });
 
 app.use((req, res) => {
-  res.status(404).json({ error: `No route for ${req.method} ${req.originalUrl}` });
+  res
+    .status(404)
+    .json({ error: `No route for ${req.method} ${req.originalUrl}` });
 });
 
 // Terminal error handler: log the detail, return something that is not a stack trace.
 app.use((err, req, res, next) => {
-  logger.error("Unhandled error on %s %s: %s", req.method, req.originalUrl, err.stack || err.message);
+  logger.error(
+    "Unhandled error on %s %s: %s",
+    req.method,
+    req.originalUrl,
+    err.stack || err.message,
+  );
   if (res.headersSent) return next(err);
   res.status(err.status || 500).json({
     error: config.env === "production" ? "Internal server error." : err.message,
