@@ -4,20 +4,10 @@ const config = require("../config");
 const logger = require("../utils/logger");
 const { connect, disconnect } = require("../db/connect");
 
-/**
- * Delivers scheduled messages.
- *
- * Everything durable lives in Mongo, which matters here specifically because
- * Task 2.1 restarts this process on CPU pressure — the thread dies with its
- * cluster worker and a replacement resumes from the same collection. An
- * in-memory timer would silently drop every pending message on each restart.
- *
- * Claims are atomic. The previous implementation ran find() and then updated
- * each document, so two schedulers could both see the same pending row and
- * deliver it twice; that was only safe because exactly one worker was ever
- * forked. A single findOneAndUpdate makes the claim the same operation as the
- * read, so extra schedulers are harmless.
- */
+// Runs the background scheduler.
+
+// "The scheduler worker periodically checks MongoDB for due scheduled posts,
+// claims jobs, processes them and updates their status."
 
 let running = true;
 let timer = null;
@@ -42,7 +32,11 @@ async function claimNext(ScheduledPost, now) {
   return ScheduledPost.findOneAndUpdate(
     { status: "pending", runAt: { $lte: now } },
     {
-      $set: { status: "processing", claimedAt: new Date(), claimedBy: `thread-${threadId}` },
+      $set: {
+        status: "processing",
+        claimedAt: new Date(),
+        claimedBy: `thread-${threadId}`,
+      },
       $inc: { attempts: 1 },
     },
     { new: true, sort: { runAt: 1 } },
@@ -61,12 +55,20 @@ async function deliver(doc, ScheduledPost, Post) {
     await ScheduledPost.updateOne(
       { _id: doc._id },
       {
-        $set: { status: "completed", postId: post._id, deliveredAt: new Date() },
+        $set: {
+          status: "completed",
+          postId: post._id,
+          deliveredAt: new Date(),
+        },
         $unset: { claimedAt: "", claimedBy: "", lastError: "" },
       },
     );
 
-    parentPort?.postMessage({ type: "delivered", scheduleId: doc._id, postId: post._id });
+    parentPort?.postMessage({
+      type: "delivered",
+      scheduleId: doc._id,
+      postId: post._id,
+    });
     logger.info(
       "Delivered scheduled message %s (%dms after due)",
       doc._id,

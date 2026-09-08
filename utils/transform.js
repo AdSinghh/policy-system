@@ -1,21 +1,8 @@
 const n = require("./normalize");
 const { deterministicId } = require("./ids");
 
-/**
- * Turns one spreadsheet row into the six documents it implies.
- *
- * Pure and synchronous: no database, no I/O. That keeps the mapping rules — which
- * are the part most likely to be wrong — unit-testable without a Mongo instance.
- *
- * ── Identity ────────────────────────────────────────────────────────────────
- * Users are keyed on `name + dob`, deliberately NOT on email.
- *
- * In the sample sheet 47 email addresses are each shared by two unrelated people
- * (different name, different DOB, different phone — an artefact of how the data
- * was generated). Keying on email merges those pairs: 1,198 rows collapse to
- * 1,149 users, 49 people are overwritten, and their policies are re-parented onto
- * a stranger. `name + dob` is unique across all 1,198 rows and survives re-import.
- */
+// Transforms raw input rows into application/MongoDB documents
+// "Transform converts the raw imported row into the structured documents used by the application."
 
 /** Column aliases, so a re-exported sheet with tidied headers still imports. */
 const COLUMN = {
@@ -50,7 +37,10 @@ function pick(row, aliases) {
   for (const alias of aliases) {
     if (row[alias] !== undefined) return row[alias];
   }
-  const flatten = (s) => String(s).toLowerCase().replace(/[\s_-]/g, "");
+  const flatten = (s) =>
+    String(s)
+      .toLowerCase()
+      .replace(/[\s_-]/g, "");
   const wanted = aliases.map(flatten);
   for (const [column, value] of Object.entries(row)) {
     if (wanted.includes(flatten(column))) return value;
@@ -108,7 +98,8 @@ function transformRow(row, rowNumber) {
 
   // premium_amount_written is empty in all 1,198 rows, but fall back to it
   // rather than assume that holds for every export.
-  const premium = n.number(get("premiumAmount")) ?? n.number(get("premiumWritten"));
+  const premium =
+    n.number(get("premiumAmount")) ?? n.number(get("premiumWritten"));
 
   return {
     ok: true,

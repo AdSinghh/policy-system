@@ -1,8 +1,5 @@
 const mongoose = require("mongoose");
 
-// Tracks one upload end to end. The upload endpoint returns a job id immediately
-// and the client polls this document; previously the API answered {ok:true} and
-// the caller had no way to learn about progress or failure.
 const ImportJobSchema = new mongoose.Schema(
   {
     originalName: String,

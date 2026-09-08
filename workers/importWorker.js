@@ -6,25 +6,15 @@ const { connect, disconnect } = require("../db/connect");
 const { readRows } = require("../utils/rowSource");
 const { transformRow } = require("../utils/transform");
 
-/**
- * One worker of the import pool.
- *
- * Striping: each worker opens the file itself and handles only the rows where
- * `rowIndex % workerCount === workerIndex`. Parsing is repeated per worker, but
- * parsing is cheap next to the database round trips, and this keeps every worker
- * streaming and memory-bounded with no coordination and no shared cursor.
- *
- * Batching: the previous implementation awaited six queries per row — roughly
- * 7,200 sequential round trips for the 1,198-row sheet. Each batch here is six
- * unordered bulkWrites regardless of batch size, so the same file becomes about
- * 36 round trips, spread across the pool.
- *
- * Deterministic _ids (utils/ids.js) are what make that possible: a policy can
- * reference a carrier in the same batch that creates it, and two workers writing
- * the same carrier converge instead of colliding.
- */
+//Performs the actual CSV/XLSX data processing.
 
-const { filePath, originalName, workerIndex, workerCount, batchSize } = workerData;
+//importWorker.js runs inside a Worker Thread and is responsible for reading,
+// transforming, validating, batching, and upserting the imported data into MongoDB.
+// Multiple workers split the rows between themselves, process them in parallel,
+// report progress back to the parent thread, and safely close their database connections when finished.
+
+const { filePath, originalName, workerIndex, workerCount, batchSize } =
+  workerData;
 
 // Dimension rows never change after first write, so $setOnInsert keeps them
 // stable. Policies and users use $set so a re-import refreshes changed values.
@@ -149,7 +139,13 @@ async function run() {
   }
 
   report();
-  parentPort.postMessage({ type: "done", workerIndex, threadId, processed, skipped });
+  parentPort.postMessage({
+    type: "done",
+    workerIndex,
+    threadId,
+    processed,
+    skipped,
+  });
 
   logger.info(
     "importWorker[%d] finished: processed=%d skipped=%d",

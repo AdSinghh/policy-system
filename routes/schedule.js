@@ -11,34 +11,29 @@ const {
   InvalidScheduleInput,
 } = require("../utils/datetime");
 
-/**
- * POST /api/schedules
- * Body: { message, day, time, timezone? }
- *
- *   day       "2026-09-05" or a weekday name ("Monday", "fri")
- *   time      "14:30" or "14:30:00", 24-hour
- *   timezone  IANA zone, e.g. "Asia/Kolkata". Defaults to DEFAULT_TIMEZONE (UTC).
- *
- * The stored `runAt` is an absolute instant. Previously the handler built
- * `new Date(\`${day}T${time}:00\`)`, which parses in the server's local zone —
- * the same request meant 09:00Z on a developer's machine and 14:30Z in the
- * container. Malformed input also reached Mongoose and surfaced as a 500; input
- * is now validated up front so it answers 400.
- */
+// schedule job - create job for schedule in future
 router.post("/", async (req, res) => {
   const { message, day, time } = req.body || {};
   const timezone = req.body?.timezone || config.defaultTimezone;
 
-  const missing = ["message", "day", "time"].filter((field) => !req.body?.[field]);
+  const missing = ["message", "day", "time"].filter(
+    (field) => !req.body?.[field],
+  );
   if (missing.length) {
     return res.status(400).json({
       error: `Missing required field(s): ${missing.join(", ")}.`,
-      expected: { message: "string", day: "YYYY-MM-DD or weekday name", time: "HH:MM" },
+      expected: {
+        message: "string",
+        day: "YYYY-MM-DD or weekday name",
+        time: "HH:MM",
+      },
     });
   }
 
   if (typeof message !== "string" || message.trim() === "") {
-    return res.status(400).json({ error: "'message' must be a non-empty string." });
+    return res
+      .status(400)
+      .json({ error: "'message' must be a non-empty string." });
   }
 
   let resolved;
@@ -92,9 +87,12 @@ router.post("/", async (req, res) => {
   }
 });
 
-/** GET /api/schedules?status= — inspect the queue. */
+// get job by status - pending completed failed
 router.get("/", async (req, res) => {
-  const limit = Math.min(100, Math.max(1, parseInt(req.query.limit || "50", 10)));
+  const limit = Math.min(
+    100,
+    Math.max(1, parseInt(req.query.limit || "50", 10)),
+  );
   const filter = {};
   if (req.query.status) filter.status = req.query.status;
 
@@ -110,11 +108,17 @@ router.get("/", async (req, res) => {
   }
 });
 
-/** GET /api/schedules/delivered — messages the scheduler has written out. */
+// get job which is delivered
 router.get("/delivered", async (req, res) => {
-  const limit = Math.min(100, Math.max(1, parseInt(req.query.limit || "50", 10)));
+  const limit = Math.min(
+    100,
+    Math.max(1, parseInt(req.query.limit || "50", 10)),
+  );
   try {
-    const posts = await Post.find().sort({ publishedAt: -1 }).limit(limit).lean();
+    const posts = await Post.find()
+      .sort({ publishedAt: -1 })
+      .limit(limit)
+      .lean();
     res.json({ posts });
   } catch (err) {
     logger.error("Failed to list delivered posts: %s", err.message);
@@ -122,7 +126,7 @@ router.get("/delivered", async (req, res) => {
   }
 });
 
-/** DELETE /api/schedules/:id — cancel something still pending. */
+// Cancelled or delete job which is pending
 router.delete("/:id", async (req, res) => {
   if (!mongoose.isValidObjectId(req.params.id)) {
     return res.status(400).json({ error: "Not a valid schedule id." });

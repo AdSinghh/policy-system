@@ -1,5 +1,7 @@
 const { createLogger, format, transports } = require("winston");
-
+// Centralized logging.
+//"Instead of using console.log throughout the application,
+// I use a centralized logger with different log levels."
 const logger = createLogger({
   level: process.env.LOG_LEVEL || "info",
   format: format.combine(

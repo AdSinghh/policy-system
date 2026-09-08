@@ -1,14 +1,6 @@
-/**
- * Builds every index declared in models/ against the configured database.
- *
- * Mongoose autoIndex would do this on boot, but that races the first import and
- * is disabled in production by convention. Run once after deploying:
- *
- *   npm run indexes
- *
- * The unique indexes matter: they are what stop a second upload of the same
- * sheet from duplicating the dataset.
- */
+// Synchronizes Mongoose schema indexes with MongoDB.
+
+// "I use this script to ensure the indexes defined in my schemas exist correctly in MongoDB."
 const mongoose = require("mongoose");
 const { connect, disconnect } = require("../db/connect");
 const logger = require("../utils/logger");
@@ -39,7 +31,9 @@ async function main() {
     logger.info(
       "%s: %s",
       name,
-      indexes.map((index) => index.name + (index.unique ? " (unique)" : "")).join(", "),
+      indexes
+        .map((index) => index.name + (index.unique ? " (unique)" : ""))
+        .join(", "),
     );
   }
 

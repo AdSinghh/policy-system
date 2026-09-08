@@ -9,27 +9,22 @@ const User = require("../models/User");
 
 function pagination(query) {
   const page = Math.max(1, parseInt(query.page || "1", 10) || 1);
-  const limit = Math.min(100, Math.max(1, parseInt(query.limit || "20", 10) || 20));
+  const limit = Math.min(
+    100,
+    Math.max(1, parseInt(query.limit || "20", 10) || 20),
+  );
   return { page, limit, skip: (page - 1) * limit };
 }
 
-/**
- * GET /api/policies/search?username=
- *
- * Finds a user by name (or email, if the term contains '@') and returns their
- * policies with carrier, category, account and agent resolved.
- *
- * The term is matched against the pre-normalised `nameKey` with an anchored,
- * escaped prefix pattern. The previous `new RegExp(username, "i")` passed raw
- * input straight into a regex — `?username=(` threw and returned 500, and a
- * pathological pattern could pin the CPU (which would then trip the watchdog).
- */
+// Search policy by user
 router.get("/search", async (req, res) => {
   const username = n.text(req.query.username);
   const { page, limit, skip } = pagination(req.query);
 
   if (!username) {
-    return res.status(400).json({ error: "Query parameter 'username' is required." });
+    return res
+      .status(400)
+      .json({ error: "Query parameter 'username' is required." });
   }
 
   try {
@@ -38,7 +33,9 @@ router.get("/search", async (req, res) => {
       ? { emailKey: term }
       : { nameKey: new RegExp(`^${n.escapeRegex(term)}`) };
 
-    const users = await User.find(userFilter).select("_id firstname email").lean();
+    const users = await User.find(userFilter)
+      .select("_id firstname email")
+      .lean();
 
     if (users.length === 0) {
       return res.json({
@@ -84,20 +81,12 @@ router.get("/search", async (req, res) => {
   }
 });
 
-/**
- * GET /api/policies/aggregate-by-user
- *
- * One row per user: policy count, premium total, and the span their policies
- * cover. `?includePolicies=true` nests the policies themselves.
- *
- * Note on this dataset: every user holds exactly one policy, so the counts are
- * all 1. That is a property of the sample sheet, not of the pipeline — the
- * earlier email-keyed importer reported 47 users with two policies, but each of
- * those was two different people merged by a shared mock email address.
- */
+// aggregating policy information by user
 router.get("/aggregate-by-user", async (req, res) => {
   const { page, limit, skip } = pagination(req.query);
-  const includePolicies = /^(1|true|yes)$/i.test(req.query.includePolicies || "");
+  const includePolicies = /^(1|true|yes)$/i.test(
+    req.query.includePolicies || "",
+  );
 
   try {
     const pipeline = [
@@ -109,7 +98,18 @@ router.get("/aggregate-by-user", async (req, res) => {
           earliestStart: { $min: "$policy_start_date" },
           latestEnd: { $max: "$policy_end_date" },
           ...(includePolicies
-            ? { policies: { $push: { policy_number: "$policy_number", premium_amount: "$premium_amount", policy_start_date: "$policy_start_date", policy_end_date: "$policy_end_date", categoryId: "$categoryId", companyId: "$companyId" } } }
+            ? {
+                policies: {
+                  $push: {
+                    policy_number: "$policy_number",
+                    premium_amount: "$premium_amount",
+                    policy_start_date: "$policy_start_date",
+                    policy_end_date: "$policy_end_date",
+                    categoryId: "$categoryId",
+                    companyId: "$companyId",
+                  },
+                },
+              }
             : {}),
         },
       },
@@ -152,7 +152,8 @@ router.get("/aggregate-by-user", async (req, res) => {
 
     // $lookup runs after $skip/$limit inside the facet, so only the current page
     // is joined against users rather than the whole collection.
-    const [result = { data: [], totalCount: [] }] = await Policy.aggregate(pipeline);
+    const [result = { data: [], totalCount: [] }] =
+      await Policy.aggregate(pipeline);
     const total = result.totalCount?.[0]?.count || 0;
 
     res.json({

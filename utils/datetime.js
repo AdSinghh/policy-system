@@ -1,14 +1,5 @@
-/**
- * Resolves a wall-clock "day + time" into an absolute UTC instant.
- *
- * `new Date("2026-09-05T14:30:00")` — no zone suffix — is parsed in the *server's*
- * local zone. The same request therefore means different things on a developer's
- * machine (Asia/Calcutta) and in a container (UTC): a 5.5-hour drift. Everything
- * here goes through an explicit IANA zone instead, defaulting to UTC.
- *
- * Uses Intl rather than a date library, so there is no extra dependency and no
- * bundled timezone database to go stale.
- */
+// Handles date, time and timezone calculations.
+//"It converts the requested day, time and timezone into a concrete execution time for scheduled posts."
 
 const WEEKDAYS = [
   "sunday",
@@ -21,8 +12,17 @@ const WEEKDAYS = [
 ];
 
 const WEEKDAY_ALIASES = {
-  sun: 0, mon: 1, tue: 2, tues: 2, wed: 3, weds: 3,
-  thu: 4, thur: 4, thurs: 4, fri: 5, sat: 6,
+  sun: 0,
+  mon: 1,
+  tue: 2,
+  tues: 2,
+  wed: 3,
+  weds: 3,
+  thu: 4,
+  thur: 4,
+  thurs: 4,
+  fri: 5,
+  sat: 6,
 };
 
 const DATE_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/;
@@ -88,7 +88,10 @@ function zoneOffsetMs(instantMs, timeZone) {
  * then re-check the offset at that candidate instant. The second pass is what
  * gets DST transitions right, where the offset before and after differ.
  */
-function wallClockToUtc({ year, month, day, hour, minute, second = 0 }, timeZone) {
+function wallClockToUtc(
+  { year, month, day, hour, minute, second = 0 },
+  timeZone,
+) {
   const asIfUtc = Date.UTC(year, month - 1, day, hour, minute, second);
 
   const firstGuess = asIfUtc - zoneOffsetMs(asIfUtc, timeZone);
@@ -145,7 +148,9 @@ function parseTime(time) {
 }
 
 function parseWeekday(day) {
-  const normalized = String(day ?? "").trim().toLowerCase();
+  const normalized = String(day ?? "")
+    .trim()
+    .toLowerCase();
   const exact = WEEKDAYS.indexOf(normalized);
   if (exact !== -1) return exact;
   if (Object.hasOwn(WEEKDAY_ALIASES, normalized)) {
@@ -163,7 +168,12 @@ function parseWeekday(day) {
  *
  * @throws {InvalidScheduleInput} so callers can answer 400 rather than 500.
  */
-function resolveScheduledInstant({ day, time, timeZone = "UTC", now = new Date() }) {
+function resolveScheduledInstant({
+  day,
+  time,
+  timeZone = "UTC",
+  now = new Date(),
+}) {
   if (!isValidTimezone(timeZone)) {
     throw new InvalidScheduleInput(
       `'timezone' is not a recognised IANA zone: ${JSON.stringify(timeZone)}. Example: Asia/Kolkata`,
@@ -190,11 +200,16 @@ function resolveScheduledInstant({ day, time, timeZone = "UTC", now = new Date()
       probe.getUTCMonth() !== m - 1 ||
       probe.getUTCDate() !== d
     ) {
-      throw new InvalidScheduleInput(`'day' is not a real calendar date: ${rawDay}`);
+      throw new InvalidScheduleInput(
+        `'day' is not a real calendar date: ${rawDay}`,
+      );
     }
 
     return {
-      runAt: wallClockToUtc({ year: y, month: m, day: d, hour, minute, second }, timeZone),
+      runAt: wallClockToUtc(
+        { year: y, month: m, day: d, hour, minute, second },
+        timeZone,
+      ),
       kind: "date",
       timeZone,
     };
@@ -212,7 +227,14 @@ function resolveScheduledInstant({ day, time, timeZone = "UTC", now = new Date()
   let delta = (weekday - today.weekday + 7) % 7;
 
   let candidate = wallClockToUtc(
-    { year: today.year, month: today.month, day: today.day + delta, hour, minute, second },
+    {
+      year: today.year,
+      month: today.month,
+      day: today.day + delta,
+      hour,
+      minute,
+      second,
+    },
     timeZone,
   );
 
@@ -220,7 +242,14 @@ function resolveScheduledInstant({ day, time, timeZone = "UTC", now = new Date()
   if (candidate.getTime() <= now.getTime()) {
     delta += 7;
     candidate = wallClockToUtc(
-      { year: today.year, month: today.month, day: today.day + delta, hour, minute, second },
+      {
+        year: today.year,
+        month: today.month,
+        day: today.day + delta,
+        hour,
+        minute,
+        second,
+      },
       timeZone,
     );
   }

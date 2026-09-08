@@ -52,16 +52,21 @@ jobs:
       packages: write
     outputs:
       image: ${{ steps.meta.outputs.image }}
+
     steps:
       - uses: actions/checkout@v5
 
-      # GHCR rejects uppercase paths, and the owner here is "AdSinghh".
+      # GHCR requires a lowercase repository path.
+      # PR refs can contain "/", for example "1/merge", which is invalid
+      # inside a Docker image tag. Replace "/" with "-" for a valid tag.
       - name: Resolve image name
         id: meta
         run: |
           REPO_LC="$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')"
+          REF_NAME="$(echo '${{ github.ref_name }}' | tr '/' '-')"
+
           echo "repo_lc=$REPO_LC" >> "$GITHUB_OUTPUT"
-          echo "image=${{ env.REGISTRY }}/$REPO_LC:${{ github.ref_name }}-${{ github.sha }}" >> "$GITHUB_OUTPUT"
+          echo "image=${{ env.REGISTRY }}/$REPO_LC:${REF_NAME}-${{ github.sha }}" >> "$GITHUB_OUTPUT"
 
       - uses: docker/setup-buildx-action@v3
 
@@ -79,14 +84,19 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
+
           # Runners are x86_64 and so is the t3.micro, so this is a native
           # build. Building on an arm64 Mac needs --platform linux/amd64.
           platforms: linux/amd64
+
           push: ${{ github.event_name == 'push' }}
+
+          # Use only the sanitized image tag generated above.
+          # This avoids the invalid PR tag generated from github.ref_name.
           tags: |
             ${{ steps.meta.outputs.image }}
-            ${{ env.REGISTRY }}/${{ steps.meta.outputs.repo_lc }}:${{ github.ref_name }}
-          # Layer cache in the registry: dependencies only reinstall when
+
+          # Layer cache in GitHub Actions: dependencies only reinstall when
           # package-lock.json changes.
           cache-from: type=gha
           cache-to: type=gha,mode=max
@@ -95,12 +105,16 @@ jobs:
   deploy:
     name: Deploy to EC2
     needs: build
+
     # Only a real push to main deploys. Pull requests and dev stop at build.
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
     runs-on: ubuntu-latest
+
     permissions:
       contents: read
       packages: read
+
     # No `environment:` block. Its `url` field cannot reference the `secrets`
     # context — only github/vars/needs/env — and using it there is a workflow
     # validation error, not a step failure: the run dies in 0s with no jobs.
@@ -115,10 +129,12 @@ jobs:
       - name: Deploy
         env:
           IMAGE: ${{ needs.build.outputs.image }}
+
           # Scoped to this run and expires with it, so no long-lived registry
           # credential is ever stored on the instance.
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GHCR_USER: ${{ github.actor }}
+
         run: |
           ssh -i ~/.ssh/deploy.pem -o BatchMode=yes -o ServerAliveInterval=30 \
             "${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}" \
@@ -139,10 +155,12 @@ jobs:
           if sudo docker image inspect policy-api:current >/dev/null 2>&1; then
             sudo docker tag policy-api:current policy-api:previous
           fi
+
           sudo docker tag "$IMAGE" policy-api:current
 
           start() {
             sudo docker rm -f policy-api >/dev/null 2>&1 || true
+
             sudo docker run -d --name policy-api --restart unless-stopped \
               --env-file .env -p 80:4000 \
               --memory 700m --memory-swap 1500m \
@@ -154,24 +172,33 @@ jobs:
           # The app answers /health only once Mongo is connected, so this also
           # catches a bad connection string or a lapsed Atlas allowlist entry.
           healthy=""
+
           for _ in $(seq 1 45); do
             if curl -sf --max-time 3 localhost:80/health >/dev/null 2>&1; then
-              healthy=1; break
+              healthy=1
+              break
             fi
+
             sleep 2
           done
 
           if [ -z "$healthy" ]; then
             echo "::error::New image failed its health check"
+
             sudo docker logs --tail 40 policy-api 2>&1 | tail -40
+
             if sudo docker image inspect policy-api:previous >/dev/null 2>&1; then
               echo "Rolling back to the previous image"
+
               start policy-api:previous
+
               sleep 10
+
               curl -sf --max-time 5 localhost:80/health >/dev/null 2>&1 \
                 && echo "Rollback succeeded — previous version is serving" \
                 || echo "::error::Rollback also failed; the instance needs attention"
             fi
+
             sudo docker logout ghcr.io >/dev/null 2>&1 || true
             exit 1
           fi
@@ -179,9 +206,11 @@ jobs:
           echo "Healthy: $(curl -s --max-time 5 localhost:80/health)"
 
           sudo docker logout ghcr.io >/dev/null 2>&1 || true
+
           # The 6.7GB disk hit 100% during earlier on-instance builds; prune so
           # old image layers cannot accumulate across deploys.
           sudo docker image prune -f >/dev/null 2>&1 || true
+
           df -h / | awk 'NR==2{print "Disk: "$4" free ("$5" used)"}'
           REMOTE
 
@@ -190,8 +219,13 @@ jobs:
           for path in /health /api-docs/ "/api/policies/aggregate-by-user?limit=1"; do
             code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 \
               "http://${{ secrets.EC2_HOST }}${path}")
+
             echo "  ${path} -> HTTP ${code}"
-            [ "$code" = "200" ] || { echo "::error::${path} returned ${code}"; exit 1; }
+
+            [ "$code" = "200" ] || {
+              echo "::error::${path} returned ${code}"
+              exit 1
+            }
           done
 
       - name: Clean up key

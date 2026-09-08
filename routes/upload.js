@@ -29,12 +29,8 @@ const upload = multer({
   },
 });
 
-/**
- * POST /api/upload  (also mounted at /api/imports)
- *
- * Accepts a CSV or XLSX file and answers 202 with a job id. The parse itself runs
- * on a pool of worker threads; poll GET /api/imports/:id to follow it.
- */
+// Uploads a CSV/Excel file, creates an import job, starts background processing,
+// and returns a jobId with 202 Accepted.
 router.post("/", (req, res) => {
   upload.single("file")(req, res, async (uploadError) => {
     if (uploadError) {
@@ -50,7 +46,10 @@ router.post("/", (req, res) => {
     if (!req.file) {
       return res
         .status(400)
-        .json({ error: "No file uploaded. Send multipart/form-data with a 'file' field." });
+        .json({
+          error:
+            "No file uploaded. Send multipart/form-data with a 'file' field.",
+        });
     }
 
     try {
@@ -87,9 +86,12 @@ router.post("/", (req, res) => {
   });
 });
 
-/** GET /api/imports — recent jobs, newest first. */
+//Returns a list of recent import jobs and their statuses.
 router.get("/", async (req, res) => {
-  const limit = Math.min(50, Math.max(1, parseInt(req.query.limit || "20", 10)));
+  const limit = Math.min(
+    50,
+    Math.max(1, parseInt(req.query.limit || "20", 10)),
+  );
   try {
     const jobs = await ImportJob.find()
       .sort({ createdAt: -1 })
@@ -103,14 +105,16 @@ router.get("/", async (req, res) => {
   }
 });
 
-/** GET /api/imports/:id — progress and outcome for one job. */
+//Returns the status/progress/result of a specific import job using its jobId.
 router.get("/:id", async (req, res) => {
   if (!mongoose.isValidObjectId(req.params.id)) {
     return res.status(400).json({ error: "Not a valid job id." });
   }
 
   try {
-    const job = await ImportJob.findById(req.params.id).select("-storedPath").lean();
+    const job = await ImportJob.findById(req.params.id)
+      .select("-storedPath")
+      .lean();
     if (!job) return res.status(404).json({ error: "Import job not found." });
     res.json(job);
   } catch (err) {

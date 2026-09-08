@@ -1,22 +1,8 @@
 const pidusage = require("pidusage");
 const logger = require("./logger");
 
-/**
- * Samples the CPU of every API worker and trips on the first one to stay above
- * the threshold.
- *
- * The sampler only detects and reports; the primary owns what a trip *means*
- * (drain, replace, cool down). Keeping those apart is what makes the cooldown
- * and the import suppression expressible at all — the original version killed
- * the worker from inside the sampler, so a still-busy box would be killed again
- * one second after its replacement booted.
- *
- * Streaks are tracked per pid, so one hot worker cannot be masked by an idle
- * sibling and a replacement never inherits its predecessor's streak.
- *
- * `pidusage` reports percentage of a single core, so on a multi-core host the
- * value can exceed 100. A 70% threshold therefore means "70% of one core".
- */
+// Monitors CPU usage of API workers.
+//"It detects sustained high CPU usage and tells the cluster supervisor when a worker should be recycled."
 function createCpuMonitor({
   thresholdPercent,
   sampleIntervalMs,
